@@ -2,6 +2,7 @@ package utils
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -77,13 +78,64 @@ func GetPodPhaseFromContainerGroupState(containerGroupState saladclient.Containe
 
 }
 
+// GetProblemDetailsFromError extracts ProblemDetails from a salad-client GenericOpenAPIError.
+// The salad-client already parses the response body into a ProblemDetails model,
+// so we should use that instead of trying to re-read the response body.
+func GetProblemDetailsFromError(err error) *saladclient.ProblemDetails {
+	if err == nil {
+		return nil
+	}
+
+	// Try to get the GenericOpenAPIError which contains the parsed model
+	type modelGetter interface {
+		Model() interface{}
+		Body() []byte
+	}
+
+	if apiErr, ok := err.(modelGetter); ok {
+		// The salad-client stores the parsed ProblemDetails in the Model field
+		if model := apiErr.Model(); model != nil {
+			if pd, ok := model.(saladclient.ProblemDetails); ok {
+				return &pd
+			}
+		}
+
+		// If Model() didn't have ProblemDetails, try to parse the body
+		if body := apiErr.Body(); len(body) > 0 {
+			var pd saladclient.ProblemDetails
+			if jsonErr := json.Unmarshal(body, &pd); jsonErr == nil {
+				return &pd
+			}
+			// Couldn't parse, create a synthetic error with the raw body
+			syntheticPD := saladclient.NewProblemDetails()
+			syntheticPD.SetType("parse_error")
+			syntheticPD.SetTitle("Failed to parse error response")
+			syntheticPD.SetDetail(string(body))
+			return syntheticPD
+		}
+	}
+
+	// Fallback: create a ProblemDetails from the error message
+	syntheticPD := saladclient.NewProblemDetails()
+	syntheticPD.SetType("unknown_error")
+	syntheticPD.SetTitle("API Error")
+	syntheticPD.SetDetail(err.Error())
+	return syntheticPD
+}
+
+// GetResponseBody reads and parses the response body as ProblemDetails.
+// Deprecated: Use GetProblemDetailsFromError instead, as the salad-client
+// already parses the response body before returning.
 func GetResponseBody(response *http.Response) (*saladclient.ProblemDetails, error) {
 	if response == nil {
 		return nil, fmt.Errorf("response was nil")
 	}
 
 	// Get response body for error info
-	body, _ := io.ReadAll(response.Body)
+	body, readErr := io.ReadAll(response.Body)
+	if readErr != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", readErr)
+	}
 	closeErr := response.Body.Close()
 	if closeErr != nil {
 		return nil, closeErr
@@ -100,6 +152,22 @@ func GetResponseBody(response *http.Response) (*saladclient.ProblemDetails, erro
 		npd.SetTitle("Error decoding response body")
 		npd.SetDetail(string(body))
 		pd.Set(npd)
+	} else {
+		// Check if the decoded ProblemDetails has empty fields
+		// This can happen when the API returns an empty JSON object or unexpected format
+		result := pd.Get()
+		if result != nil && result.Type == nil && result.Title == nil && result.Detail == nil {
+			// All fields are nil, include the raw body for debugging
+			npd := saladclient.NewProblemDetails()
+			npd.SetType("empty_error_response")
+			npd.SetTitle(fmt.Sprintf("HTTP %d", response.StatusCode))
+			if len(body) > 0 {
+				npd.SetDetail(string(body))
+			} else {
+				npd.SetDetail("(empty response body)")
+			}
+			pd.Set(npd)
+		}
 	}
 	return pd.Get(), nil
 }

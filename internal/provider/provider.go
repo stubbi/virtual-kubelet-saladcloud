@@ -283,21 +283,24 @@ func (p *SaladCloudProvider) GetPodStatus(ctx context.Context, namespace string,
 		GetContainerGroup(p.contextWithAuth(), p.inputVars.OrganizationName, p.inputVars.ProjectName, podname).
 		Execute()
 	if err != nil {
-		// Get response body for error info
-		pd, err := utils.GetResponseBody(response)
-		if err != nil {
-			p.logger.Errorf("GetPodStatus: %s", err)
-			return nil, err
+		// Extract error details from the salad-client error
+		pd := utils.GetProblemDetailsFromError(err)
+
+		statusCode := 0
+		if response != nil {
+			statusCode = response.StatusCode
 		}
 
 		if response != nil && response.StatusCode == http.StatusNotFound {
 			p.logger.WithField("namespace", namespace).
-				WithField("name", podname).
-				Warnf("Not Found")
+				WithField("containerGroupName", podname).
+				Warnf("Container group not found")
 		} else {
 			p.logger.WithField("namespace", namespace).
 				WithField("name", name).
-				Errorf("ContainerGroupsAPI.GetPodStatus: %+v ", *pd)
+				WithField("containerGroupName", podname).
+				WithField("statusCode", statusCode).
+				Errorf("ContainerGroupsAPI.GetPodStatus: %+v", *pd)
 		}
 		return nil, models.NewSaladCloudError(err, response)
 	}
@@ -330,14 +333,15 @@ func (p *SaladCloudProvider) GetPodStatus(ctx context.Context, namespace string,
 func (p *SaladCloudProvider) GetPods(_ context.Context) ([]*corev1.Pod, error) {
 	resp, r, err := p.apiClient.ContainerGroupsAPI.ListContainerGroups(p.contextWithAuth(), p.inputVars.OrganizationName, p.inputVars.ProjectName).Execute()
 	if err != nil {
-		// Get response body for error info
-		pd, err := utils.GetResponseBody(r)
-		if err != nil {
-			p.logger.Errorf("GetPods: %s", err)
-			return nil, err
-		}
+		// Extract error details from the salad-client error
+		pd := utils.GetProblemDetailsFromError(err)
 
-		p.logger.Errorf("`ContainerGroupsAPI.GetPods`: Error: %+v", *pd)
+		statusCode := 0
+		if r != nil {
+			statusCode = r.StatusCode
+		}
+		p.logger.WithField("statusCode", statusCode).
+			Errorf("`ContainerGroupsAPI.GetPods`: Error: %+v", *pd)
 		return nil, err
 	}
 	pods := make([]*corev1.Pod, 0)
